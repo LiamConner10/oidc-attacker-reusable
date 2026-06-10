@@ -35,21 +35,19 @@ jobs:
             "https://api.github.com/installation/repositories?per_page=5" -w '\nT1_HTTP %{http_code}\n' \
             | jq -c '{repo:.repositories[0].full_name}'
 
-          echo "--- TEST 2: GET workflow runs (actions:read)"
+          echo "--- TEST 2: actions:read — list workflow runs"
           curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/actions/runs?per_page=1" -w '\nT2_HTTP %{http_code}\n' \
             | jq -c '{total_count, latest_run_id: .workflow_runs[0].id}'
 
           echo "--- TEST 3: workflows:write — push new workflow file"
           POC_NAME="POC_install_${GITHUB_RUN_ID}.yml"
-          POC_CONTENT='name: poc-write-test
-on: workflow_dispatch
-jobs:
-  noop:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "install token created this workflow"'
-          POC_B64=$(printf '%s' "$POC_CONTENT" | base64 -w0)
+          printf 'name: poc-test\non: workflow_dispatch\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "install token wrote me"\n' > /tmp/poc_content.yml
+          POC_B64=$(base64 -w0 < /tmp/poc_content.yml)
+          MAIN_SHA=$(curl -sk -H "Authorization: Bearer $INSTALL" "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/git/ref/heads/main" | jq -r .object.sha)
+          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
+            -X POST "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/git/refs" \
+            -d "{\"ref\":\"refs/heads/perm-poc\",\"sha\":\"$MAIN_SHA\"}" -w '\nBRANCH_HTTP %{http_code}\n' | jq -c '{ok:.ref, err:.message}'
           curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
             -X PUT "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/contents/.github/workflows/$POC_NAME" \
             -d "{\"message\":\"PoC install token workflows:write\",\"content\":\"$POC_B64\",\"branch\":\"perm-poc\"}" \
